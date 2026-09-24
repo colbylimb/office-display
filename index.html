@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Office Display</title>
+<style>
+  :root { --z: 0.7; --cols: 2; --bar: #7fb3d5; }
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; cursor: none; }
+  #stage { position: relative; width: 100%; height: 100%; }
+  .pane { position: absolute; inset: 0; overflow: hidden; opacity: 0; transition: opacity .8s ease; }
+  .pane.on { opacity: 1; z-index: 2; }
+  .pane iframe { border: 0; width: 100%; height: 100%; display: block; background: #fff; }
+
+  body.grid #stage { display: grid; grid-template-columns: repeat(var(--cols), 1fr); grid-auto-rows: 1fr; gap: 4px; }
+  body.grid .pane { position: relative; opacity: 1; }
+  body.grid .pane iframe {
+    width: calc(100% / var(--z));
+    height: calc(100% / var(--z));
+    transform: scale(var(--z));
+    transform-origin: 0 0;
+  }
+
+  #progress { position: fixed; left: 0; bottom: 0; height: 4px; width: 0; background: var(--bar); opacity: .55; z-index: 10; }
+  #paused { position: fixed; right: 16px; bottom: 16px; z-index: 10; font: 600 14px system-ui, sans-serif;
+            color: #fff; background: rgba(0,0,0,.6); padding: 6px 12px; border-radius: 6px; display: none; }
+  body.is-paused #paused { display: block; }
+  body.no-bar #progress { display: none; }
+  @media (prefers-reduced-motion: reduce) { .pane { transition: none; } }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<div id="progress"></div>
+<div id="paused">Paused</div>
+
+<script>
+/* ============================================================
+   YOUR DASHBOARDS — add, remove, or reorder lines here.
+   Each line: { name, url }  plus optional  seconds: 90
+   to give that one dashboard its own screen time.
+   ============================================================ */
+const DASHBOARDS = [
+  { name: 'GLP-1 Fill Tracker', url: 'https://colbylimb.github.io/cvp-glp1-dashboard/' },
+  { name: 'Gibsons Fill',       url: 'https://colbylimb.github.io/gibsons-fill-dashboard/' },
+  // { name: 'Vaccine Counter', url: 'https://colbylimb.github.io/your-next-dashboard/' },
+];
+
+/*
+  URL options (all optional):
+    ?mode=rotate   one dashboard at a time, in list order (default)
+    ?mode=grid     all dashboards on screen at once
+    ?mode=cycle    each dashboard in turn, then the grid, then repeat
+    &only=1,3      use just these dashboards (numbers match the list order above)
+    &t=150         default seconds per view (150 = 2.5 min)
+    &zoom=0.6      how far to shrink each dashboard in grid view (0.3–1)
+    &reload=30     minutes between refreshing each dashboard (0 = never)
+    &bar=0         hide the progress line at the bottom
+  ("split" still works as another name for "grid".)
+
+  Keyboard (if one is plugged into the Pi):
+    → or Space  next view     G  switch rotate/grid     P  pause/resume
+*/
+const q = new URLSearchParams(location.search);
+let mode = (q.get('mode') || 'rotate').toLowerCase();
+if (mode === 'split') mode = 'grid';
+const defaultSeconds = Math.max(10, Number(q.get('t')) || 150);
+const reloadMin = q.has('reload') ? Number(q.get('reload')) : 30;
+if (q.get('bar') === '0') document.body.classList.add('no-bar');
+
+let list = DASHBOARDS;
+if (q.get('only')) {
+  const picks = q.get('only').split(',').map(n => parseInt(n, 10) - 1);
+  list = picks.map(i => DASHBOARDS[i]).filter(Boolean);
+  if (!list.length) list = DASHBOARDS;
+}
+
+// Grid layout: 2 → side by side, 3–4 → 2×2, 5–6 → 3×2, 7–9 → 3×3
+const cols = list.length <= 2 ? list.length : Math.ceil(Math.sqrt(list.length));
+const autoZoom = cols <= 2 ? 0.7 : cols === 3 ? 0.5 : 0.4;
+const zoom = Math.min(1, Math.max(0.3, Number(q.get('zoom')) || autoZoom));
+document.documentElement.style.setProperty('--cols', cols);
+document.documentElement.style.setProperty('--z', zoom);
+
+// Build one pane per dashboard. They all stay loaded; switching only changes what's visible.
+const stage = document.getElementById('stage');
+const panes = list.map(d => {
+  const pane = document.createElement('div');
+  pane.className = 'pane';
+  const f = document.createElement('iframe');
+  f.title = d.name; f.src = d.url;
+  pane.appendChild(f); stage.appendChild(pane);
+  return { pane, frame: f, loaded: Date.now(), seconds: d.seconds || defaultSeconds };
+});
+
+// A "view" is either a dashboard index (0, 1, 2…) or 'grid'.
+const singles = panes.map((_, i) => i);
+const sequences = { rotate: singles, grid: ['grid'], cycle: [...singles, 'grid'] };
+let seq = list.length === 1 ? [0] : (sequences[mode] || sequences.rotate);
+let idx = 0, elapsed = 0, paused = false;
+const bar = document.getElementById('progress');
+
+function viewSeconds(v) { return v === 'grid' ? defaultSeconds : panes[v].seconds; }
+
+function apply(v) {
+  document.body.classList.toggle('grid', v === 'grid');
+  panes.forEach((p, i) => p.pane.classList.toggle('on', v === i));
+}
+
+function reloadPane(p) { p.frame.src = p.frame.src; p.loaded = Date.now(); }
+
+// Refresh dashboards only while they're off screen, so the TV never shows a blank reload.
+function refreshHidden(v) {
+  if (!reloadMin || v === 'grid') return;
+  panes.forEach((p, i) => {
+    if (i !== v && Date.now() - p.loaded > reloadMin * 60000) reloadPane(p);
+  });
+}
+
+function next() {
+  idx = (idx + 1) % seq.length;
+  elapsed = 0;
+  apply(seq[idx]);
+  refreshHidden(seq[idx]);
+}
+
+apply(seq[0]);
+
+setInterval(() => {
+  if (paused || seq.length < 2) { if (seq.length < 2) bar.style.width = '0'; return; }
+  elapsed += 0.25;
+  const s = viewSeconds(seq[idx]);
+  bar.style.width = (elapsed / s * 100) + '%';
+  if (elapsed >= s) next();
+}, 250);
+
+// In grid-only mode nothing is ever hidden, so refresh everything on the timer instead.
+if (reloadMin) setInterval(() => {
+  if (seq.length === 1 && seq[0] === 'grid') panes.forEach(reloadPane);
+}, reloadMin * 60000);
+
+document.addEventListener('keydown', e => {
+  const k = e.key.toLowerCase();
+  if (e.key === 'ArrowRight' || e.key === ' ') next();
+  if (k === 'p') { paused = !paused; document.body.classList.toggle('is-paused', paused); }
+  if (k === 'g' || k === 's') {
+    seq = (seq.length === 1 && seq[0] === 'grid') ? sequences.rotate : sequences.grid;
+    idx = -1; next();
+  }
+});
+</script>
+</body>
+</html>
